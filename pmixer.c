@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <argp.h>
+
 #include <pulse/pulseaudio.h>
 
 #define clean_errno() (errno == 0 ? "None" : strerror(errno))
@@ -8,7 +10,6 @@
 #define log_err(M, ...) fprintf(stderr, "[ERROR] (%s:%d: errno: %s) " M "\n", __FILE__, __LINE__, clean_errno(), ##__VA_ARGS__)
 #define log_warn(M, ...) fprintf(stderr, "[WARN] (%s:%d: errno: %s) " M "\n", __FILE__, __LINE__, clean_errno(), ##__VA_ARGS__)
 #define log_info(M, ...) fprintf(stderr, "[INFO] (%s:%d) " M "\n", __FILE__, __LINE__, ##__VA_ARGS__)
-
 
 #define check(A, M, ...) if(!(A)) { log_err(M, ##__VA_ARGS__); errno=0; goto error; }
 
@@ -148,11 +149,82 @@ void set_mute(struct pmixer_priv * priv, uint32_t index, int mute)
     pa_operation_unref(op);
 }
 
+const char *argp_program_version = "pmixer 0.1";
+const char *argp_program_bug_address = "phil@dixon.gen.nz";
+
+static char doc[] =
+        "pmixer -- Pulse Audio volume control from the shell.";
+
+static char args_doc[] = "<command>";
+
+static struct argp_option options[] = {
+    {"verbose", 'v', 0, 0, "Enable detailed output"},
+    { 0 }
+};
+
+enum commands {
+    CMD_NOP,
+    CMD_INC,
+    CMD_DEC,
+    CMD_MUTE
+};
+
+struct cmd_map {
+    enum commands cmd;
+    char *text;
+};
+
+struct cmd_map cmd_map[] = {
+    {CMD_INC, "inc"},
+    {CMD_DEC, "dec"},
+    {CMD_MUTE, "mute"},
+    { 0 }
+};
+
+struct arguments {
+    enum commands command;
+    int verbose;
+};
+
+static error_t parse_opt(int key, char *arg, struct argp_state *state)
+{
+    struct arguments *arguments = state->input;
+
+    switch(key) {
+        case 'v':
+            arguments->verbose = 1;
+            break;
+        case ARGP_KEY_ARG:
+            if (state->arg_num >= 1)
+                argp_usage(state);
+            for(int i = 0; cmd_map[i].cmd != 0; i++) {
+                if (strcmp(arg, cmd_map[i].text) == 0) {
+                    arguments->command = cmd_map[i].cmd;
+                    break;
+                }
+            }
+            break;
+        case ARGP_KEY_END:
+            if (state->arg_num < 1)
+                argp_usage(state);
+            break;
+        default:
+            return ARGP_ERR_UNKNOWN;
+    }
+
+    return 0;
+}
+
+static struct argp argp = {options, parse_opt, args_doc, doc};
+
 int main(int argc, char *argv[])
 {
     struct pmixer_priv priv;
+    struct arguments arguments;
     int retval;
     struct sink_info *info = NULL;
+
+    argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
     check_mem(priv.mainloop = pa_mainloop_new());
     priv.mainloop_api = pa_mainloop_get_api(priv.mainloop);
@@ -171,7 +243,19 @@ int main(int argc, char *argv[])
 
     check(info = get_default_sink(&priv), "Can't get default sink.");
     log_info("got sink %d, volume %u", info->index, pa_cvolume_avg(&info->volume));
-    set_mute(&priv, info->index, !info->mute);
+
+    switch (arguments.command) {
+        case CMD_MUTE:
+            set_mute(&priv, info->index, !info->mute);
+            break;
+        case CMD_INC:
+            set_volume(&priv, info->index, pa_cvolume_inc_clamp(&info->volume, PA_VOLUME_NORM/20, PA_VOLUME_UI_MAX));
+            break;
+        case CMD_DEC:
+            set_volume(&priv, info->index, pa_cvolume_dec(&info->volume, PA_VOLUME_NORM/20));
+            break;
+    }
+
     if (state == CONNECTED)
         pa_context_disconnect(priv.context);
     pa_context_unref(priv.context);
